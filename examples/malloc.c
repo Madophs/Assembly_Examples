@@ -1,7 +1,5 @@
 #include <stdio.h>
-
-extern void * allocate(int);
-extern void deallocate(void *);
+#include "../include/malloc.h"
 
 void main_finish() {
     printf("Just finished\n");

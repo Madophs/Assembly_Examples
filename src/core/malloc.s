@@ -4,10 +4,17 @@
 .globl deallocate
 # header tells if block is used and the size, 8 bytes for each
 .section .data
+
+.globl heap_start
+.hidden heap_start
 heap_start:
     .quad 0
+
+.globl heap_end
+.hidden heap_end
 heap_end:
     .quad 0
+
 .section .text
 
 .equ BRK_SYSCALL, 12
