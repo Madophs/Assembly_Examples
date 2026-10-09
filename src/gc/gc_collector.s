@@ -21,8 +21,8 @@ data_seg_start:
     .quad 0
 data_seg_size:
     .quad 0
-.text
 
+.text
 # PH_LOAD is 64 bytes after program start address
 .equ PH_LOAD_OFFSET, 0x40
 
@@ -42,7 +42,7 @@ gc_init:
     # address to return after call (main)
     mov 8(%rsp), %rax
     # compute text segment address
-    and $-0xfff, %rax
+    and $-0x1000, %rax
     # header address aka program base address
     sub $0x1000, %rax
     mov %rax, proc_addr_start(%rip)
@@ -68,8 +68,6 @@ gc_init_loop:
     mov %rdi, data_seg_start(%rip)
     # calculate data section size
     mov PH_MEMSIZ(%rax), %rdi
-    #add $0xfff, %rdi
-    #and $-0x1000, %rdi
     mov %rdi, data_seg_size(%rip)
     xor %rax, %rax
     add $8, %rsp
@@ -78,35 +76,52 @@ gc_init_loop_next:
     add $PH_ENTRY_SIZE, %rax
     jmp gc_init_loop
 
-.globl gc_traverse_stack
-gc_traverse_stack:
+.globl gc_collect
+gc_collect:
     push %rbp
     mov %rsp, %rbp
-    sub $16, %rsp
-    mov heap_start(%rip), %rax
-    mov %rax, 8(%rsp)
-    mov heap_end(%rip), %rax
-    mov %rax, (%rsp)
-    mov stack_rbp(%rip), %rcx
-gc_traverse_stack_loop:
-    cmp %rbp, %rcx
-    jae gc_traverse_stack_finish
-    # heap_start cmp
-    cmp 8(%rsp), %rcx
-    jb gc_traverse_stack_end
-    # heap end cmp
-    cmp (%rsp), %rcx
-    ja gc_traverse_stack_end
-gc_traverse_stack_end:
-    add $8, %rcx
-    jmp gc_traverse_stack_loop
-gc_traverse_stack_finish:
+    call gc_create_mem_block_table
+    call gc_unmark_mem_blocks
+    call gc_scan_data_section
+    call gc_scan_stack
+    xor %rax, %rax
     mov %rbp, %rsp
     pop %rbp
     ret
 
-.globl gc_create_heap_ptr_table
-gc_create_heap_ptr_table:
+gc_scan_stack:
+    push %rbp
+    mov %rsp, %rbp
+    sub $16, %rsp
+    mov heap_start(%rip), %rdi
+    mov heap_end(%rip), %rsi
+    mov stack_rbp(%rip), %rcx
+gc_scan_stack_loop:
+    cmp %rbp, %rcx
+    jbe gc_scan_stack_finish
+    # heap_start cmp
+    cmp (%rcx), %rdi
+    ja gc_scan_stack_end
+    cmp (%rcx), %rsi
+    jb gc_scan_stack_end
+
+    push %rdi
+    push %rcx
+
+    mov (%rcx), %rdi
+    call gc_mark_mem_block
+
+    pop %rcx
+    pop %rdi
+gc_scan_stack_end:
+    sub $8, %rcx
+    jmp gc_scan_stack_loop
+gc_scan_stack_finish:
+    mov %rbp, %rsp
+    pop %rbp
+    ret
+
+gc_create_mem_block_table:
     push %rbp
     mov %rsp, %rbp
     sub $32, %rsp
@@ -118,6 +133,9 @@ gc_create_heap_ptr_table:
     # allocate twice the heap size to store memory block data
     # compute heap size
     sub 24(%rsp), %rax
+
+    # extra 16 bytes to store memory block count
+    add $0x10, %rax
 
     # store heap size
     mov %rax, 8(%rsp)
@@ -134,19 +152,31 @@ gc_create_heap_ptr_table:
     cmp %rax, %rdi
     jne gc_return_with_error
 
-    # start at heap_start
+    # start at heap_start (memory block traversing)
     mov 24(%rsp), %rcx
 
-    # start heap ptr table address (heap_end)
+    # construct heap ptr table beyond heap end
     mov 16(%rsp), %rsi
-gc_create_heap_ptr_table_loop:
+
+    # we will use the first 16 bytes of heap memory table
+    # to store the counter (rdx)
+    xor %rdx, %rdx
+    # make sure counter location is zero
+    mov %rdx, (%rsi)
+    mov %rdx, 8(%rsi) # not required but anyway...
+    # advance table pointer pass the counter
+    add $0x10, %rsi
+gc_create_mem_block_table_loop:
     # heap_end - curr heap address
     cmp 16(%rsp), %rcx
-    jae gc_create_heap_ptr_table_loop_finish
+    jae gc_create_mem_block_table_loop_finish
 
     # store block start address in heap ptr table
     mov %rcx, (%rsi)
     add $8, %rsi
+
+    # memory block counter
+    inc %rdx
 
     # continue to next block
     # block size
@@ -154,16 +184,18 @@ gc_create_heap_ptr_table_loop:
     add %rdi, %rcx
     # header size
     add $16, %rcx
-    jmp gc_create_heap_ptr_table_loop
+    jmp gc_create_mem_block_table_loop
 
-gc_create_heap_ptr_table_loop_finish:
+gc_create_mem_block_table_loop_finish:
+    # update memory counter at table start
+    mov 16(%rsp), %rsi
+    mov %rdx, (%rsi)
     # return ptr table's end address
     mov (%rsp), %rax
     mov %rbp, %rsp
     pop %rbp
     ret
 
-.globl gc_scan_data_section
 gc_scan_data_section:
     push %rbp
     mov %rsp, %rbp
@@ -187,8 +219,12 @@ gc_scan_data_section_loop:
     cmp (%rsp), %rsi
     ja gc_scan_data_section_loop_end
 gc_scan_data_section_hit:
-    mov $1, %r8
-    mov %r8, -0x10(%rsi)
+    push %rax
+    push %rcx
+    mov %rsi, %rdi
+    call gc_mark_mem_block
+    pop %rcx
+    pop %rax
 gc_scan_data_section_loop_end:
     inc %rcx
     jmp gc_scan_data_section_loop
@@ -198,9 +234,35 @@ gc_scan_data_section_loop_finish:
     pop %rbp
     ret
 
+# mark memory block as non-free if valid
+gc_mark_mem_block:
+    sub $8, %rsp
+    mov heap_end(%rip), %rax
+    # make pointer point at the beginning of the memory block
+    sub $0x10, %rdi
+    # memory counter
+    mov (%rax), %rcx
+    # advance pass the memory counter
+    add $0x10, %rax
+gc_mark_mem_block_loop:
+    cmp $0, %rcx
+    jz gc_mark_mem_block_finish
+    cmp (%rax), %rdi
+    jne gc_mark_mem_block_loop_end
+    mov $1, %r8
+    mov (%rax), %rax
+    mov %r8, (%rax)
+    jmp gc_mark_mem_block_finish
+gc_mark_mem_block_loop_end:
+    dec %rcx
+    add $8, %rax
+    jmp gc_mark_mem_block_loop
+gc_mark_mem_block_finish:
+    add $8, %rsp
+    ret
+
 
 # set as available all memory block allocated by allocate function
-.globl gc_unmark_mem_blocks
 gc_unmark_mem_blocks:
     push %rbp
     mov %rsp, %rbp
