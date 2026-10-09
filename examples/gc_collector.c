@@ -10,17 +10,22 @@ struct person {
     int age;
 };
 
+int *static_ptr = 0;
+char c = 'a';
+long ghost_address = 0;
+char *hola = "hola mundo";
+struct person *nier;
+
 void pointer_goes_out_of_scope() {
     int *num = allocate(sizeof(int));
     *num = 0x1000;
     long *num2 = allocate(sizeof(long));
     *num2 = 32;
+    char *ghost_text = allocate(sizeof(char) * 64);
+    strcpy(ghost_text, "This is a ghost pointer");
+    ghost_address = (long)&(*ghost_text);
     gc_collect();
 }
-
-int *static_ptr = 0;
-char *hola = "hola mundo";
-struct person *nier;
 
 int main() {
     gc_init();
@@ -41,6 +46,7 @@ int main() {
     pointer_goes_out_of_scope();
     long *val = allocate(sizeof(long));
     *val = 512;
+    c = 'z';
     gc_collect();
     return 0;
 }
