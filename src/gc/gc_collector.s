@@ -82,11 +82,38 @@ gc_collect:
     mov %rsp, %rbp
     call gc_create_mem_block_table
     call gc_unmark_mem_blocks
-    call gc_scan_data_section
+
+    # data section scanning
+    mov data_seg_start(%rip), %rdi
+    mov %rdi, %rsi
+    add data_seg_size(%rip), %rsi
+    mov $8, %rdx
+    call gc_scan_memory
+
+    # heap section scanning
+    # scanning the heap by 8 bytes hops is buggy
+    # as the is heap usually not aligned to 8 bytes
+    # but I set it up that way because is faster
+    # If you want a better scan change rdx to 1
+    mov heap_start(%rip), %rdi
+    mov heap_end(%rip), %rsi
+    mov $8, %rdx
+    call gc_scan_memory
+
     call gc_scan_stack
+    call gc_restore_heap
+
     xor %rax, %rax
     mov %rbp, %rsp
     pop %rbp
+    ret
+
+gc_restore_heap:
+    sub $8, %rsp
+    mov heap_end(%rip), %rdi
+    mov $0xc, %rax
+    syscall
+    add $8, %rsp
     ret
 
 gc_scan_stack:
@@ -196,40 +223,35 @@ gc_create_mem_block_table_loop_finish:
     pop %rbp
     ret
 
-gc_scan_data_section:
+# params:
+#   rdi -> start memory location
+#   rsi -> end memory location
+#   rdx -> byte hop size
+gc_scan_memory:
     push %rbp
     mov %rsp, %rbp
-    sub $16, %rsp
-    mov heap_start(%rip), %rax
-    mov %rax, 8(%rsp)
-    mov heap_end(%rip), %rax
-    mov %rax, (%rsp)
-    # data section start address
-    mov data_seg_start(%rip), %rcx
-    # data section end address (bss)
-    mov %rcx, %rdx
-    add data_seg_size(%rip), %rdx
-gc_scan_data_section_loop:
-    cmp %rdx, %rcx
-    jae gc_scan_data_section_loop_finish
+    mov heap_start(%rip), %r8
+    mov heap_end(%rip), %r9
+gc_scan_memory_loop:
+    cmp %rsi, %rdi
+    jae gc_scan_memory_loop_finish
     # dereference data contigent "pointer"
-    mov (%rcx), %rsi
-    cmp 8(%rsp), %rsi
-    jb gc_scan_data_section_loop_end
-    cmp (%rsp), %rsi
-    ja gc_scan_data_section_loop_end
-gc_scan_data_section_hit:
-    push %rax
+    mov (%rdi), %rcx
+    cmp %r8, %rcx
+    jb gc_scan_memory_loop_end
+    cmp %r9, %rcx
+    ja gc_scan_memory_loop_end
+gc_scan_memory_hit:
     push %rcx
-    mov %rsi, %rdi
+    push %rdi
+    mov %rcx, %rdi
     call gc_mark_mem_block
+    pop %rdi
     pop %rcx
-    pop %rax
-gc_scan_data_section_loop_end:
-    inc %rcx
-    jmp gc_scan_data_section_loop
-gc_scan_data_section_loop_finish:
-    mov $0, %rax
+gc_scan_memory_loop_end:
+    add %rdx, %rdi
+    jmp gc_scan_memory_loop
+gc_scan_memory_loop_finish:
     mov %rbp, %rsp
     pop %rbp
     ret
